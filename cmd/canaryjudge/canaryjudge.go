@@ -10,9 +10,16 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
 	metrics "k8s.io/metrics/pkg/client/clientset/versioned"
+
+	cacheddiscovery "k8s.io/client-go/discovery/cached/memory"
+	customclient "k8s.io/metrics/pkg/client/custom_metrics"
 )
 
 func main() {
@@ -33,16 +40,24 @@ func main() {
 	// create the clientset
 	clientset, err := kubernetes.NewForConfig(config)
 	metricsClient, _ := metrics.NewForConfig(config)
+
 	if err != nil {
 		panic(err.Error())
 	}
+
+	discoveryClient := discovery.NewDiscoveryClientForConfigOrDie(config)
+	cachedDiscoClient := cacheddiscovery.NewMemCacheClient(discoveryClient)
+	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscoClient)
+	restMapper.Reset()
+	apiVersionsGetter := customclient.NewAvailableAPIsGetter(discoveryClient)
+	customMetricsClient := customclient.NewForConfig(config, restMapper, apiVersionsGetter)
 
 	namespace := "applications"
 
 	for {
 		deployments, _ := clientset.AppsV1beta2().Deployments(namespace).List(metav1.ListOptions{})
 		for _, deployment := range deployments.Items {
-			if deployment.Name != "blog" {
+			if deployment.Name != "resume" {
 				continue
 			}
 
@@ -55,6 +70,7 @@ func main() {
 			pods, _ := clientset.CoreV1().Pods(namespace).List(metav1.ListOptions{LabelSelector: labelSelector})
 
 			for _, pod := range pods.Items {
+
 				fmt.Printf("Pod name: %s\n", pod.Name)
 				podMetrics, _ := metricsClient.MetricsV1beta1().PodMetricses(namespace).Get(pod.Name, metav1.GetOptions{})
 				for _, container := range podMetrics.Containers {
@@ -64,6 +80,10 @@ func main() {
 					memQuantity := int64(math.Ceil(float64(memQuantityRaw) / 1024 / 1024))
 					fmt.Printf("\t\tCPU: %d\n\t\tMemory: %d\n", cpuQuantity, memQuantity)
 				}
+
+				value, _ := customMetricsClient.NamespacedMetrics(namespace).GetForObject(schema.GroupKind{Group: "", Kind: "Pod"}, pod.Name, "nginx_http_requests_per_second", labels.NewSelector())
+				fmt.Printf("\tCustom prometheus metric:\n")
+				fmt.Printf("\t\tnginx_http_requests_per_second: %vm\n", value.Value.MilliValue())
 			}
 		}
 		fmt.Printf("---\n\n")
